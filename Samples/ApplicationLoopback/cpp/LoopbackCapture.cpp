@@ -336,8 +336,31 @@ DWORD CLoopbackCapture::DoPlaybackThread()
     // Make sure you have enough buffer size at hnsBufferDuration 
     Sleep(1000);
 
+
+    // schedule the next random mute start in, say, 3..8 seconds
+    srand(GetTickCount());
+    m_nextMuteStart = GetTickCount() + (3000 + rand() % 5000);
+
     while (m_bContinuePlayback)
     {
+        DWORD now = GetTickCount();
+
+        // Check if we are supposed to start mute now
+        if (!m_muteActive && now >= m_nextMuteStart)
+        {
+            // begin mute
+            m_muteActive = true;
+            m_muteEndTime = now + 1500; // 1.5 second from now
+        }
+        // check if mute ended
+        if (m_muteActive && now >= m_muteEndTime)
+        {
+            m_muteActive = false;
+            // schedule next mute in 3..8 seconds from now
+            m_nextMuteStart = now + (3000 + rand() % 5000);
+        }
+
+
         // if there's data in queue, pop and play
         if (!m_AudioQueue.empty())
         {
@@ -345,6 +368,12 @@ DWORD CLoopbackCapture::DoPlaybackThread()
             m_CritSec.lock();
             auto buffer = std::move(m_AudioQueue.front());
             m_AudioQueue.pop();
+
+            // if muteActive, zero out the buffer
+            if (m_muteActive)
+            {
+                memset(buffer.data(), 0, buffer.size());
+            }
 
             // Number of frames
             UINT32 frames = buffer.size() / m_CaptureFormat.nBlockAlign;

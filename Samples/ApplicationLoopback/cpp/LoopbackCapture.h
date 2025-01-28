@@ -50,6 +50,11 @@ private:
      // We'll keep a simple queue of raw bytes
     std::queue<std::vector<BYTE>> m_AudioQueue;
 
+    // mute control
+    bool m_muteActive = false;
+    DWORD m_muteEndTime = 0;    // GetTickCount time when we stop muting
+    DWORD m_nextMuteStart = 0;  // next time we initiate the mute
+
     // We'll also have a separate event or thread that tries to "drain" the queue to playback.
     wil::unique_handle m_hPlaybackThread;
     static DWORD WINAPI PlaybackThreadProc(LPVOID lpParameter);
