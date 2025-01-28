@@ -1,5 +1,8 @@
 #pragma once
 
+#include <queue>
+#include <vector>
+
 #include <AudioClient.h>
 #include <mmdeviceapi.h>
 #include <initguid.h>
@@ -44,8 +47,15 @@ private:
         Stopping,
         Stopped,
     };
+     // We'll keep a simple queue of raw bytes
+    std::queue<std::vector<BYTE>> m_AudioQueue;
 
-    // --- existing private methods ---
+    // We'll also have a separate event or thread that tries to "drain" the queue to playback.
+    wil::unique_handle m_hPlaybackThread;
+    static DWORD WINAPI PlaybackThreadProc(LPVOID lpParameter);
+    DWORD DoPlaybackThread();
+    bool m_bContinuePlayback = false;
+
     HRESULT OnStartCapture(IMFAsyncResult* pResult);
     HRESULT OnStopCapture(IMFAsyncResult* pResult);
     HRESULT OnFinishCapture(IMFAsyncResult* pResult);
@@ -58,7 +68,6 @@ private:
     HRESULT FinishCaptureAsync();
     HRESULT SetDeviceStateErrorIfFailed(HRESULT hr);
 
-    // --- existing private members ---
     wil::com_ptr_nothrow<IAudioClient> m_AudioClient;
     WAVEFORMATEX m_CaptureFormat{};
     UINT32 m_BufferFrames = 0;

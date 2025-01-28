@@ -72,8 +72,8 @@ HRESULT CLoopbackCapture::InitializePlayback()
     RETURN_IF_FAILED(spDevice->Activate(__uuidof(IAudioClient), CLSCTX_ALL, nullptr, (void**)&m_RenderClient));
 
     // 3. Initialize the render client in shared mode with the same format we used for capturing
-    //    The buffer duration here is just an example (200ms in 100-ns units).
-    REFERENCE_TIME hnsBufferDuration = 2000000; // 200ms
+    //    The buffer duration here is just an example (ms in 100-ns units).
+    REFERENCE_TIME hnsBufferDuration = 50000000; // 5000ms (5s)
     RETURN_IF_FAILED(m_RenderClient->Initialize(
         AUDCLNT_SHAREMODE_SHARED,
         0, // no special stream flags, can use EVENTCALLBACK if you prefer
@@ -311,11 +311,52 @@ HRESULT CLoopbackCapture::OnStartCapture(IMFAsyncResult* pResult)
             RETURN_IF_FAILED(StartPlayback());
             // ==========================================
 
+            // Start playback thread
+            m_bContinuePlayback = true;
+            m_hPlaybackThread.reset(CreateThread(nullptr, 0, PlaybackThreadProc, this, 0, nullptr));
+
             m_DeviceState = DeviceState::Capturing;
             MFPutWaitingWorkItem(m_SampleReadyEvent.get(), 0, m_SampleReadyAsyncResult.get(), &m_SampleReadyKey);
 
             return S_OK;
         }());
+}
+
+
+// For a loop with Sleep(10) to periodically write available frames to the playback client.
+DWORD WINAPI CLoopbackCapture::PlaybackThreadProc(LPVOID lpParameter)
+{
+    CLoopbackCapture* pThis = reinterpret_cast<CLoopbackCapture*>(lpParameter);
+    return pThis->DoPlaybackThread();
+}
+DWORD CLoopbackCapture::DoPlaybackThread()
+{
+    // We introduce a 1-second "initial delay" by just sleeping
+    // This ensures the output lags behind the capture by ~1s
+    // Make sure you have enough buffer size at hnsBufferDuration 
+    Sleep(1000);
+
+    while (m_bContinuePlayback)
+    {
+        // if there's data in queue, pop and play
+        if (!m_AudioQueue.empty())
+        {
+            // lock if needed
+            m_CritSec.lock();
+            auto buffer = std::move(m_AudioQueue.front());
+            m_AudioQueue.pop();
+
+            // Number of frames
+            UINT32 frames = buffer.size() / m_CaptureFormat.nBlockAlign;
+            WriteCapturedDataToPlayback(buffer.data(), frames);
+        }
+        else
+        {
+            // No data, so wait a little
+            Sleep(10);
+        }
+    }
+    return 0;
 }
 
 
@@ -355,8 +396,16 @@ HRESULT CLoopbackCapture::OnStopCapture(IMFAsyncResult* pResult)
     }
 
     m_AudioClient->Stop();
-    m_SampleReadyAsyncResult.reset();
 
+    // stop playback thread
+    m_bContinuePlayback = false;
+    if (m_hPlaybackThread.is_valid())
+    {
+        WaitForSingleObject(m_hPlaybackThread.get(), 5000);
+        m_hPlaybackThread.reset(nullptr);
+    }
+
+    m_SampleReadyAsyncResult.reset();
     return FinishCaptureAsync();
 }
 
@@ -449,9 +498,15 @@ HRESULT CLoopbackCapture::OnAudioSampleRequested()
             m_AudioCaptureClient->GetBuffer(&Data, &FramesAvailable, &dwCaptureFlags,
                 &u64DevicePosition, &u64QPCPosition));
 
-        // ========== NEW: Pass data immediately to playback ==============
-        RETURN_IF_FAILED(WriteCapturedDataToPlayback(Data, FramesAvailable));
-        // ================================================================
+        // store data in a vector
+        std::vector<BYTE> buffer(cbBytesToCapture);
+        memcpy_s(buffer.data(), cbBytesToCapture, Data, cbBytesToCapture);
+
+        // push into queue
+        m_AudioQueue.push(std::move(buffer));
+
+        // release the capture buffer
+        m_AudioCaptureClient->ReleaseBuffer(FramesAvailable);
 
         // The code below is the original WAV-file writing. You can remove or keep for reference:
         /*
@@ -467,9 +522,6 @@ HRESULT CLoopbackCapture::OnAudioSampleRequested()
         }
         m_cbDataSize += cbBytesToCapture;
         */
-
-        // release buffer
-        m_AudioCaptureClient->ReleaseBuffer(FramesAvailable);
     }
 
     return S_OK;
