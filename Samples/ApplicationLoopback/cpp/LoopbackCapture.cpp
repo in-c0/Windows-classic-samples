@@ -6,6 +6,7 @@
 #include <Functiondiscoverykeys_devpkey.h>
 #include <Audiopolicy.h>
 #include "LoopbackCapture.h"
+#include "Timer.cpp"
 
 #define BITS_PER_BYTE 8
 
@@ -338,26 +339,27 @@ DWORD CLoopbackCapture::DoPlaybackThread()
 
 
     // schedule the next random mute start in, say, 3..8 seconds
-    srand(GetTickCount());
-    m_nextMuteStart = GetTickCount() + (3000 + rand() % 5000);
+    Timer timer;
+    double now = timer.GetTimeInSeconds();
+    m_nextMuteStart = now + (3.0 + static_cast<double>(rand() % 5000) / 1000.0); // Next mute in 3–8 seconds
 
     while (m_bContinuePlayback)
     {
-        DWORD now = GetTickCount();
+        now = timer.GetTimeInSeconds();
 
         // Check if we are supposed to start mute now
         if (!m_muteActive && now >= m_nextMuteStart)
         {
             // begin mute
             m_muteActive = true;
-            m_muteEndTime = now + 1500; // 1.5 second from now
+            m_muteEndTime = now + 1.5; // 1.5 second from now
         }
         // check if mute ended
         if (m_muteActive && now >= m_muteEndTime)
         {
             m_muteActive = false;
             // schedule next mute in 3..8 seconds from now
-            m_nextMuteStart = now + (3000 + rand() % 5000);
+            m_nextMuteStart = now + (3.0 + static_cast<double>(rand() % 5000) / 1000.0); // Next mute in 3–8 seconds
         }
 
 

@@ -148,6 +148,7 @@
   <ItemGroup>
     <ClCompile Include="ApplicationLoopback.cpp" />
     <ClCompile Include="LoopbackCapture.cpp" />
+    <ClCompile Include="Timer.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="Common.h" />
