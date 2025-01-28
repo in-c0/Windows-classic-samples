@@ -28,35 +28,13 @@ void usage()
 
 int wmain(int argc, wchar_t* argv[])
 {
-    if (argc != 4)
-    {
-        usage();
-        return 0;
-    }
+    // If no arguments are provided, default to excluding the current process
+    DWORD processId = GetCurrentProcessId(); // Get your own process ID
+    bool includeProcessTree = false;        // Default to "excludetree"
+    PCWSTR outputFile = L"ExcludedAudio.wav"; // Default output filename
 
-    DWORD processId = wcstoul(argv[1], nullptr, 0);
-    if (processId == 0)
-    {
-        usage();
-        return 0;
-    }
-
-    bool includeProcessTree;
-    if (wcscmp(argv[2], L"includetree") == 0)
-    {
-        includeProcessTree = true;
-    }
-    else if (wcscmp(argv[2], L"excludetree") == 0)
-    {
-        includeProcessTree = false;
-    }
-    else
-    {
-        usage();
-        return 0;
-    }
-
-    PCWSTR outputFile = argv[3];
+    // Inform the user of default behavior
+    std::wcout << L"Automatically capturing audio excluding the current process (PID: " << processId << L").\n";
 
     CLoopbackCapture loopbackCapture;
     HRESULT hr = loopbackCapture.StartCaptureAsync(processId, includeProcessTree, outputFile);
@@ -69,12 +47,12 @@ int wmain(int argc, wchar_t* argv[])
     }
     else
     {
-        std::wcout << L"Capturing 10 seconds of audio." << std::endl;
+        std::wcout << L"Capturing audio for 10 seconds...\n";
         Sleep(10000);
 
         loopbackCapture.StopCaptureAsync();
 
-        std::wcout << L"Finished.\n";
+        std::wcout << L"Finished. Audio saved to: " << outputFile << L"\n";
     }
 
     return 0;

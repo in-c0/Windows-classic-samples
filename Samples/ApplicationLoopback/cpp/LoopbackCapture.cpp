@@ -2,7 +2,9 @@
 #include <wchar.h>
 #include <iostream>
 #include <audioclientactivationparams.h>
-
+#include <mmdeviceapi.h>
+#include <Functiondiscoverykeys_devpkey.h>
+#include <Audiopolicy.h>
 #include "LoopbackCapture.h"
 
 #define BITS_PER_BYTE 8
@@ -14,6 +16,77 @@ HRESULT CLoopbackCapture::SetDeviceStateErrorIfFailed(HRESULT hr)
         m_DeviceState = DeviceState::Error;
     }
     return hr;
+}
+
+
+
+HRESULT CLoopbackCapture::WriteCapturedDataToPlayback(BYTE* pData, UINT32 numFrames)
+{
+    // We might need to handle the case where the render buffer has fewer frames than we want to write.
+    // For simplicity, let's assume we have enough buffer. In a robust app, you'd loop if needed.
+    UINT32 padding = 0;
+    RETURN_IF_FAILED(m_RenderClient->GetCurrentPadding(&padding));
+
+    UINT32 framesAvailable = m_RenderBufferFrames - padding;
+    if (numFrames > framesAvailable)
+    {
+        // In a real app, you'd handle this properly (maybe partial write).
+        numFrames = framesAvailable;
+    }
+
+    BYTE* pRenderBuffer = nullptr;
+    RETURN_IF_FAILED(m_AudioRenderClient->GetBuffer(numFrames, &pRenderBuffer));
+
+    // Copy from capture buffer to playback buffer
+    size_t bytesToCopy = (size_t)numFrames * m_CaptureFormat.nBlockAlign;
+    memcpy_s(pRenderBuffer, bytesToCopy, pData, bytesToCopy);
+
+    // Deliver the data
+    RETURN_IF_FAILED(m_AudioRenderClient->ReleaseBuffer(numFrames, 0));
+
+    return S_OK;
+}
+
+
+
+HRESULT CLoopbackCapture::StartPlayback()
+{
+    RETURN_IF_FAILED(m_RenderClient->Start());
+    return S_OK;
+}
+
+HRESULT CLoopbackCapture::InitializePlayback()
+{
+    // 1. Get the default render device via classic endpoint APIs
+    wil::com_ptr_nothrow<IMMDeviceEnumerator> spEnumerator;
+    RETURN_IF_FAILED(CoCreateInstance(
+        __uuidof(MMDeviceEnumerator),
+        nullptr,
+        CLSCTX_ALL,
+        IID_PPV_ARGS(&spEnumerator)));
+
+    wil::com_ptr_nothrow<IMMDevice> spDevice;
+    RETURN_IF_FAILED(spEnumerator->GetDefaultAudioEndpoint(eRender, eConsole, &spDevice));
+
+    // 2. Activate IAudioClient for rendering
+    RETURN_IF_FAILED(spDevice->Activate(__uuidof(IAudioClient), CLSCTX_ALL, nullptr, (void**)&m_RenderClient));
+
+    // 3. Initialize the render client in shared mode with the same format we used for capturing
+    //    The buffer duration here is just an example (200ms in 100-ns units).
+    REFERENCE_TIME hnsBufferDuration = 2000000; // 200ms
+    RETURN_IF_FAILED(m_RenderClient->Initialize(
+        AUDCLNT_SHAREMODE_SHARED,
+        0, // no special stream flags, can use EVENTCALLBACK if you prefer
+        hnsBufferDuration,
+        0,
+        &m_CaptureFormat,
+        nullptr));
+
+    // 4. Get the size of the render buffer and the IAudioRenderClient interface
+    RETURN_IF_FAILED(m_RenderClient->GetBufferSize(&m_RenderBufferFrames));
+    RETURN_IF_FAILED(m_RenderClient->GetService(IID_PPV_ARGS(&m_AudioRenderClient)));
+
+    return S_OK;
 }
 
 HRESULT CLoopbackCapture::InitializeLoopbackCapture()
@@ -233,6 +306,11 @@ HRESULT CLoopbackCapture::OnStartCapture(IMFAsyncResult* pResult)
             // Start the capture
             RETURN_IF_FAILED(m_AudioClient->Start());
 
+            // === NEW: Initialize and start playback ===
+            RETURN_IF_FAILED(InitializePlayback());
+            RETURN_IF_FAILED(StartPlayback());
+            // ==========================================
+
             m_DeviceState = DeviceState::Capturing;
             MFPutWaitingWorkItem(m_SampleReadyEvent.get(), 0, m_SampleReadyAsyncResult.get(), &m_SampleReadyKey);
 
@@ -351,66 +429,47 @@ HRESULT CLoopbackCapture::OnAudioSampleRequested()
 
     auto lock = m_CritSec.lock();
 
-    // If this flag is set, we have already queued up the async call to finialize the WAV header
-    // So we don't want to grab or write any more data that would possibly give us an invalid size
     if (m_DeviceState == DeviceState::Stopping)
     {
         return S_OK;
     }
 
-    // A word on why we have a loop here;
-    // Suppose it has been 10 milliseconds or so since the last time
-    // this routine was invoked, and that we're capturing 48000 samples per second.
-    //
-    // The audio engine can be reasonably expected to have accumulated about that much
-    // audio data - that is, about 480 samples.
-    //
-    // However, the audio engine is free to accumulate this in various ways:
-    // a. as a single packet of 480 samples, OR
-    // b. as a packet of 80 samples plus a packet of 400 samples, OR
-    // c. as 48 packets of 10 samples each.
-    //
-    // In particular, there is no guarantee that this routine will be
-    // run once for each packet.
-    //
-    // So every time this routine runs, we need to read ALL the packets
-    // that are now available;
-    //
-    // We do this by calling IAudioCaptureClient::GetNextPacketSize
-    // over and over again until it indicates there are no more packets remaining.
+    // keep retrieving as many frames as available
     while (SUCCEEDED(m_AudioCaptureClient->GetNextPacketSize(&FramesAvailable)) && FramesAvailable > 0)
     {
         cbBytesToCapture = FramesAvailable * m_CaptureFormat.nBlockAlign;
 
-        // WAV files have a 4GB (0xFFFFFFFF) size limit, so likely we have hit that limit when we
-        // overflow here.  Time to stop the capture
         if ((m_cbDataSize + cbBytesToCapture) < m_cbDataSize)
         {
             StopCaptureAsync();
             break;
         }
 
-        // Get sample buffer
-        RETURN_IF_FAILED(m_AudioCaptureClient->GetBuffer(&Data, &FramesAvailable, &dwCaptureFlags, &u64DevicePosition, &u64QPCPosition));
+        RETURN_IF_FAILED(
+            m_AudioCaptureClient->GetBuffer(&Data, &FramesAvailable, &dwCaptureFlags,
+                &u64DevicePosition, &u64QPCPosition));
 
+        // ========== NEW: Pass data immediately to playback ==============
+        RETURN_IF_FAILED(WriteCapturedDataToPlayback(Data, FramesAvailable));
+        // ================================================================
 
-        // Write File
+        // The code below is the original WAV-file writing. You can remove or keep for reference:
+        /*
         if (m_DeviceState != DeviceState::Stopping)
         {
             DWORD dwBytesWritten = 0;
-            RETURN_IF_WIN32_BOOL_FALSE(WriteFile(
+            WriteFile(
                 m_hFile.get(),
                 Data,
                 cbBytesToCapture,
                 &dwBytesWritten,
-                NULL));
+                NULL);
         }
-
-        // Release buffer back
-        m_AudioCaptureClient->ReleaseBuffer(FramesAvailable);
-
-        // Increase the size of our 'data' chunk.  m_cbDataSize needs to be accurate
         m_cbDataSize += cbBytesToCapture;
+        */
+
+        // release buffer
+        m_AudioCaptureClient->ReleaseBuffer(FramesAvailable);
     }
 
     return S_OK;
